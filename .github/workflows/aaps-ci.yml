@@ -1,9 +1,6 @@
 name: AAPS CI
 
 on:
-  push:
-    branches: [ master ]    # Trigger når du commit'er til master
-    buildVariant: 'fullRelease'
   workflow_dispatch:        # Lar deg trigge manuelt med en knapp    inputs:
     buildVariant:
       description: 'Select Build Variant'
