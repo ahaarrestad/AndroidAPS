@@ -3,21 +3,22 @@ name: AAPS CI
 on:
   push:
     branches: [ master ]    # Trigger når du commit'er til master
+    buildVariant: 'fullRelease'
   workflow_dispatch:        # Lar deg trigge manuelt med en knapp    inputs:
-      buildVariant:
-        description: 'Select Build Variant'
-        required: true
-        default: 'fullRelease'
-        type: choice
-        options:
-          - fullRelease
-          - fullDebug
-          - aapsclientRelease
-          - aapsclientDebug
-          - aapsclient2Release
-          - aapsclient2Debug
-          - pumpcontrolRelease
-          - pumpcontrolDebug
+    buildVariant:
+      description: 'Select Build Variant'
+      required: true
+      default: 'fullRelease'
+      type: choice
+      options:
+        - fullRelease
+        - fullDebug
+        - aapsclientRelease
+        - aapsclientDebug
+        - aapsclient2Release
+        - aapsclient2Debug
+        - pumpcontrolRelease
+        - pumpcontrolDebug
 
 jobs:
   build:
