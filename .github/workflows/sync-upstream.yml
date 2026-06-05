@@ -5,35 +5,47 @@ on:
     - cron: '0 0 * * *' # Kjører hver natt
   workflow_dispatch:    # Lar deg starte manuelt
 
+permissions:
+  contents: write
+
 jobs:
-  sync-and-build:
+  sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Sync Fork with Upstream
-        run: |
-          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/${{ github.repository }}/merge-upstream \
-            -d '{"branch":"master"}')
+      - name: Checkout master
+        uses: actions/checkout@v5
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-          if [ "$RESPONSE" -eq 200 ] || [ "$RESPONSE" -eq 202 ]; then
-            echo "Status $RESPONSE: Synkronisering vellykket."
-            echo "SYNC_UPDATED=true" >> $GITHUB_ENV
-          elif [ "$RESPONSE" -eq 409 ]; then
-            echo "Status $RESPONSE: Konflikt oppdaget. Du må merge manuelt i nettleseren."
-            exit 1
-          else
-            echo "Status $RESPONSE: Noe gikk galt med synkroniseringen!"
+      - name: Merge upstream into master
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/nightscout/AndroidAPS.git || true
+          git fetch upstream master
+
+          BEFORE=$(git rev-parse HEAD)
+
+          # Ekte merge i stedet for GitHub sitt merge-upstream-API. API-et klarer
+          # kun fast-forward og feiler (status 409/422) så snart forken har egne
+          # eller divergerende commits. En vanlig git-merge synker også slike forker.
+          if ! git merge --no-edit upstream/master; then
+            echo "❌ Merge-konflikt mot upstream. Må løses manuelt."
+            git merge --abort || true
             exit 1
           fi
 
-      - name: Trigger AAPS CI build
-        if: env.SYNC_UPDATED == 'true'
-        run: |
-          curl -s -X POST \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/${{ github.repository }}/actions/workflows/aaps-ci.yml/dispatches \
-            -d '{"ref":"master"}'
-          echo "AAPS CI build triggered."
+          AFTER=$(git rev-parse HEAD)
+
+          if [ "$BEFORE" = "$AFTER" ]; then
+            echo "✅ Allerede oppdatert – ingenting å synkronisere."
+          else
+            git push origin master
+            echo "✅ Synkronisert med upstream og pushet til master."
+          fi
+
+      # Merk: bygging trigges ikke automatisk lenger. AAPS CI bygger en valgt
+      # versjons-tag og feiler bevisst uten en tag, så start den manuelt via
+      # «Run workflow» og velg ønsket AAPS-versjon når du vil bygge.

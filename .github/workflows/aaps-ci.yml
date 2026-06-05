@@ -62,7 +62,23 @@ jobs:
   build:
     name: Build AAPS
     runs-on: ubuntu-latest
+    env:
+      # tagName-inputet finnes kun ved manuell start (workflow_dispatch).
+      # Ved push (eller dispatch uten input) er det tomt. Vi defaulter IKKE til
+      # en versjon – i stedet feiler "Validate tag input"-steget under med en
+      # tydelig melding, slik at vi aldri bygger feil versjon i det stille.
+      TAG_NAME: ${{ github.event.inputs.tagName }}
     steps:
+      - name: Validate tag input
+        run: |
+          if [ -z "${{ env.TAG_NAME }}" ]; then
+            echo "❌ Ingen versjons-tag angitt (tagName er tom)."
+            echo "   Denne workflowen må startes manuelt via «Run workflow» og velge en AAPS-versjon,"
+            echo "   eller trigges av Sync upstream. Push til master bygger ikke automatisk en versjon."
+            exit 1
+          fi
+          echo "✅ Bygger AAPS-versjon: ${{ env.TAG_NAME }}"
+
       - name: Decode Secrets Keystore Set and Oauth2 to Env
         run: |
           if [ -n "${{ secrets.KEYSTORE_SET }}" ]; then
@@ -196,14 +212,14 @@ jobs:
       - name: Fetch selected tag from upstream
         run: |
           git remote add upstream https://github.com/nightscout/AndroidAPS.git || true
-          git fetch upstream refs/tags/${{ github.event.inputs.tagName }}:refs/tags/${{ github.event.inputs.tagName }}
-          echo "✅ Tag ${{ github.event.inputs.tagName }} fetched from upstream."
+          git fetch upstream refs/tags/${{ env.TAG_NAME }}:refs/tags/${{ env.TAG_NAME }}
+          echo "✅ Tag ${{ env.TAG_NAME }} fetched from upstream."
 
       - name: Determine JVM version from tag
         run: |
           # jdk-map.json must be read before switching to the upstream tag,
           # as the upstream tag does not contain this file.
-          TAG="${{ github.event.inputs.tagName }}"
+          TAG="${{ env.TAG_NAME }}"
           JAVA_VERSION=$(jq -r '.default' .github/jdk-map.json)
           while IFS=$'\t' read -r pattern jdk; do
             if [[ "$TAG" == $pattern ]]; then
@@ -216,8 +232,8 @@ jobs:
 
       - name: Switch to selected tag
         run: |
-          git checkout refs/tags/${{ github.event.inputs.tagName }}
-          echo "✅ Checked out tag ${{ github.event.inputs.tagName }}"
+          git checkout refs/tags/${{ env.TAG_NAME }}
+          echo "✅ Checked out tag ${{ env.TAG_NAME }}"
 
       - name: Set BUILD_VARIANT
         run: |
