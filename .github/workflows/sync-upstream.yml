@@ -5,21 +5,46 @@ on:
     - cron: '0 0 * * *' # Kjører hver natt
   workflow_dispatch:    # Lar deg starte manuelt
 
+# GITHUB_TOKEN brukes bevisst ikke her – all autentisering går via SYNC_PAT.
+# To grunner, begge er harde GitHub-begrensninger som ikke kan konfigureres bort:
+#
+#   1. GITHUB_TOKEN kan ikke pushe endringer under .github/workflows/. Det krever
+#      `workflow`-scope, som kun finnes på PAT-er – det er ingen tilsvarende
+#      nøkkel i `permissions:` under. Uten PAT feiler pushen hver gang upstream
+#      rører en av sine egne workflow-filer.
+#   2. Kjøringer utløst med GITHUB_TOKEN startes aldri av GitHub (rekursjonssperre),
+#      så bygget under ville blitt stilltiende ignorert.
+#
+# SYNC_PAT må være en fine-grained PAT på ahaarrestad/AndroidAPS med
+# Contents: read+write, Workflows: read+write og Actions: read+write.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      - name: Sjekk at SYNC_PAT finnes
+        env:
+          SYNC_PAT: ${{ secrets.SYNC_PAT }}
+        run: |
+          if [ -z "$SYNC_PAT" ]; then
+            echo "❌ Mangler secret SYNC_PAT."
+            echo "   Opprett en fine-grained PAT på ahaarrestad/AndroidAPS med"
+            echo "   Contents: read+write, Workflows: read+write, Actions: read+write,"
+            echo "   og legg den inn under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+
       - name: Checkout master
         uses: actions/checkout@v5
         with:
           ref: master
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.SYNC_PAT }}
 
       - name: Merge upstream into master
+        id: merge
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -37,15 +62,74 @@ jobs:
             exit 1
           fi
 
-          AFTER=$(git rev-parse HEAD)
-
-          if [ "$BEFORE" = "$AFTER" ]; then
+          if [ "$BEFORE" = "$(git rev-parse HEAD)" ]; then
             echo "✅ Allerede oppdatert – ingenting å synkronisere."
-          else
-            git push origin master
-            echo "✅ Synkronisert med upstream og pushet til master."
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-      # Merk: bygging trigges ikke automatisk lenger. AAPS CI bygger en valgt
-      # versjons-tag og feiler bevisst uten en tag, så start den manuelt via
-      # «Run workflow» og velg ønsket AAPS-versjon når du vil bygge.
+          # Versjonen leses fra det som nettopp ble merget inn, og bestemmer både
+          # hvilken tag AAPS CI bygger og hvilken mappe APK-ene havner i på Drive.
+          VERSION=$(grep 'val appVersion' buildSrc/src/main/kotlin/Versions.kt | awk -F '"' '{print $2}')
+          if [ -z "$VERSION" ]; then
+            echo "❌ Klarte ikke lese appVersion fra buildSrc/src/main/kotlin/Versions.kt."
+            exit 1
+          fi
+
+          git push origin master
+
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "✅ Synkronisert med upstream og pushet til master. Ny versjon: $VERSION"
+
+      - name: Vent på at upstream har pusher release-taggen
+        if: steps.merge.outputs.updated == 'true'
+        env:
+          VERSION: ${{ steps.merge.outputs.version }}
+        run: |
+          # AAPS CI bygger refs/tags/$VERSION hos upstream. Har de pushet master
+          # før taggen, må vi vente litt – ellers feiler bygget på git fetch.
+          for i in 1 2 3 4 5; do
+            if git ls-remote --exit-code --tags upstream "refs/tags/$VERSION" >/dev/null 2>&1; then
+              echo "✅ Tag $VERSION finnes hos upstream."
+              exit 0
+            fi
+            echo "⏳ Tag $VERSION ikke pushet ennå (forsøk $i/5) – venter 60s..."
+            sleep 60
+          done
+
+          echo "❌ Upstream har ikke pushet tag $VERSION."
+          echo "   Syncen er fullført, men bygget kan ikke starte uten taggen."
+          echo "   Start «AAPS CI» manuelt når taggen dukker opp."
+          exit 1
+
+      - name: Trigger AAPS CI build
+        if: steps.merge.outputs.updated == 'true'
+        env:
+          SYNC_PAT: ${{ secrets.SYNC_PAT }}
+          VERSION: ${{ steps.merge.outputs.version }}
+        run: |
+          RESPONSE=$(curl -sS -o /tmp/dispatch.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $SYNC_PAT" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/aaps-ci.yml/dispatches" \
+            -d "{\"ref\":\"master\",\"inputs\":{\"tagName\":\"$VERSION\",\"buildVariant\":\"fullRelease\"}}")
+
+          if [ "$RESPONSE" = "204" ]; then
+            echo "✅ AAPS CI startet for versjon $VERSION (fullRelease)."
+            exit 0
+          fi
+
+          echo "❌ Klarte ikke starte AAPS CI (HTTP $RESPONSE):"
+          cat /tmp/dispatch.json
+
+          if [ "$RESPONSE" = "422" ]; then
+            echo ""
+            echo "ℹ️ 422 betyr som regel at '$VERSION' ikke ligger i tagName-lista i"
+            echo "   .github/workflows/aaps-ci.yml. Den lista eies og vedlikeholdes av"
+            echo "   upstream. Tilgjengelige versjoner akkurat nå:"
+            sed -n '/tagName:/,/buildVariant:/p' .github/workflows/aaps-ci.yml \
+              | grep -oE '^ +- [0-9]+(\.[0-9]+)+' | sed 's/^ *- /     /'
+          fi
+          exit 1
